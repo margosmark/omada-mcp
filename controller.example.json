@@ -1,0 +1,6 @@
+{
+  "baseUrl": "https://<controller-host>:8043",
+  "controllerId": "<omadacId from /api/info>",
+  "controllerVersion": "<controllerVer from /api/info>",
+  "certificateSha256": "<SHA-256 of the controller's leaf certificate — written by `node setup.mjs`>"
+}
