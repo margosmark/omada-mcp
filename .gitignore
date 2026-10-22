@@ -1,0 +1,15 @@
+# Generated at setup time — environment-specific, never commit
+controller.json
+controller.pem
+
+# Credentials
+.secrets/
+.env
+.env.local
+*.pem
+
+# Dependencies
+node_modules/
+
+# Logs
+*.log

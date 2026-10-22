@@ -1,0 +1,39 @@
+{
+  "name": "omada-mcp",
+  "version": "0.1.0",
+  "description": "Read-only Model Context Protocol server for TP-Link Omada controllers",
+  "type": "module",
+  "bin": {
+    "omada-mcp": "src/index.mjs",
+    "omada-mcp-setup": "setup.mjs"
+  },
+  "files": [
+    "src",
+    "setup.mjs",
+    "configure.py",
+    "controller.example.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "node setup.mjs",
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "omada",
+    "tplink",
+    "sdn",
+    "read-only"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  }
+}
