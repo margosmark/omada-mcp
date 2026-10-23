@@ -1,6 +1,6 @@
 # omada-mcp
 
-A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server for
+A [Model Context Protocol](https://modelcontextprotocol.io) server for
 [TP-Link Omada](https://www.omadanetworks.com/) controllers (SDN / Omada Controller 5.x–6.x).
 
 It lets an MCP client (OpenCode, Claude, Cursor, etc.) inspect an Omada network — sites, devices,
@@ -32,7 +32,8 @@ explicit opt-in rather than an assumption, and it stays constrained even when on
 7. **Read-back.** Each write returns Omada's acknowledgement (`errorCode 0` = accepted); verify
    with the read tools before and after.
 
-If you want write access, use a tool that was built and reviewed for it — not this one.
+Write access *is* available here — it's just opt-in and bounded. Turn it on only when you intend to
+change configuration; leave it off for routine inspection. See [Write mode](#write-mode).
 
 ## Safety properties
 
