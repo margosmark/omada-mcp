@@ -24,21 +24,27 @@ test('assertReadOnly permits GET and the OAuth token endpoint only', () => {
   // site IDs (see test below), never from user-supplied strings.
 });
 
-test('the OmadaClient has no write methods', () => {
+test('the OmadaClient exposes exactly one gated write entry point', () => {
   const client = new OmadaClient({ baseUrl: 'https://x', omadacId: 'o', agent: undefined, accessToken: 't' });
-  const writeVerbs = ['post', 'put', 'patch', 'delete', 'create', 'update', 'remove', 'set', 'apply'];
   const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(client));
-  for (const verb of writeVerbs) {
-    assert.ok(
-      !methods.some((m) => m.toLowerCase() === verb),
-      `client exposes a method that looks like a write: ${verb}`,
-    );
+
+  // No per-object convenience writers that could bypass the guard.
+  const forbidden = ['create', 'createAcl', 'createGatewayAcl', 'delete', 'deleteAcl', 'deleteGatewayAcl',
+    'update', 'updateAcl', 'post', 'put', 'patch', 'reboot', 'rebootDevice', 'apply', 'commit', 'set'];
+  for (const verb of forbidden) {
+    assert.ok(!methods.includes(verb), `client exposes a bypass writer: ${verb}`);
   }
-  // Every public method must be read-shaped.
-  const allowed = new Set(['constructor', 'authMode', 'request', 'listSites', 'listDevices', 'listClients', 'getLanNetworks', 'readDataset']);
+
+  // Only the reviewed methods may exist. `write` is the single gated entry point;
+  // it refuses unless the instance was built with enableWrites, and routes through
+  // the operation whitelist (tested in write-guard.test.mjs).
+  const allowed = new Set(['constructor', 'authMode', 'writesEnabled', 'request', 'write',
+    'listSites', 'listDevices', 'listClients', 'getLanNetworks', 'readDataset']);
   for (const name of methods) {
     if (!allowed.has(name)) throw new Error(`Unexpected client method: ${name}`);
   }
+  assert.equal(typeof client.write, 'function');
+  assert.equal(client.writesEnabled, false, 'writes must be off by default');
 });
 
 test('assertReadOnly is enforced inside client.request before any socket work', async () => {

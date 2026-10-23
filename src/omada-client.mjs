@@ -2,13 +2,18 @@ import https from 'node:https';
 import { URL } from 'node:url';
 
 import { accessTokenHeader, assertReadOnly, collectPages } from './core.mjs';
+import { WRITE_OPS, assertWriteAllowed, buildWritePath, writesEnabled } from './write-guard.mjs';
 
 /**
- * Minimal, read-only Omada Open API client.
+ * Omada Open API client.
  *
- * Deliberately self-contained: it has no write methods, so no configuration change
- * is reachable through it. Every outbound request passes assertReadOnly, which
- * permits only GET plus the single OAuth token endpoint.
+ * Read-only by default: every request passes assertReadOnly, which permits only
+ * GET plus the single OAuth token endpoint.
+ *
+ * Writes are available only when OMADA_ENABLE_WRITES=true. Even then, only the
+ * operations in WRITE_OPS are reachable, paths are built from validated
+ * identifiers, and the method guard re-checks every mutating request. Tool calls
+ * additionally default to dry-run; see src/write-tools.mjs.
  */
 export class OmadaClient {
   #baseUrl;
@@ -19,8 +24,9 @@ export class OmadaClient {
   #clientId;
   #clientSecret;
   #pendingToken;
+  #writesEnabled;
 
-  constructor({ baseUrl, omadacId, agent, accessToken, clientId, clientSecret, timeout = 15_000 }) {
+  constructor({ baseUrl, omadacId, agent, accessToken, clientId, clientSecret, timeout = 15_000, enableWrites = false }) {
     if (!baseUrl || !omadacId) throw new Error('baseUrl and omadacId are required.');
     this.#baseUrl = baseUrl.replace(/\/$/, '');
     this.#omadacId = omadacId;
@@ -29,11 +35,17 @@ export class OmadaClient {
     this.#accessToken = accessToken;
     this.#clientId = clientId;
     this.#clientSecret = clientSecret;
+    this.#writesEnabled = enableWrites === true;
   }
 
   /** True when credentials were supplied but no token is cached yet. */
   get authMode() {
     return this.#accessToken ? 'access-token' : 'client-credentials';
+  }
+
+  /** Whether this client was constructed with write capability enabled. */
+  get writesEnabled() {
+    return this.#writesEnabled;
   }
 
   #url(version, path) {
@@ -42,14 +54,21 @@ export class OmadaClient {
 
   /** Low-level request. Returns the parsed JSON envelope. */
   async request(method, path, { params, body, version = 'v1' } = {}) {
-    assertReadOnly(method, path);
+    const m = String(method).toUpperCase();
+    if (m === 'GET') {
+      assertReadOnly(m, path);
+    } else {
+      // Defence in depth: re-checks the fully-built path against WRITE_OPS.
+      if (!this.#writesEnabled) assertReadOnly(m, path);
+      assertWriteAllowed(m, this.#url(version, path), this.#omadacId);
+    }
     const url = new URL(this.#url(version, path));
     for (const [key, value] of Object.entries(params ?? {})) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
 
     const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
-    const isTokenRequest = method.toUpperCase() === 'POST';
+    const isTokenRequest = m === 'POST' && url.pathname === '/openapi/authorize/token';
     if (isTokenRequest) {
       // Token endpoint: OAuth body auth, no bearer header.
     } else {
@@ -59,8 +78,27 @@ export class OmadaClient {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     if (payload) headers['Content-Length'] = payload.length;
 
-    const raw = await this.#send({ method, url, headers, payload });
-    return this.#envelope(raw, method, url.pathname);
+    const raw = await this.#send({ method: m, url, headers, payload });
+    // Reads must return data; writes may legitimately return no result field
+    // (e.g. reorder uses OperationResponseWithoutResult).
+    return this.#envelope(raw, m, url.pathname, { requireResult: m === 'GET' });
+  }
+
+  /**
+   * Perform one allowlisted write. Throws before any network I/O if writes are
+   * disabled or the operation is unknown.
+   */
+  async write(opName, { siteId, params = {}, body }) {
+    if (!this.#writesEnabled) {
+      throw new Error('Writes are disabled. Start the server with OMADA_ENABLE_WRITES=true to allow them.');
+    }
+    const op = WRITE_OPS[opName];
+    if (!op) throw new Error(`Unknown write operation: ${opName}`);
+    if (body === undefined || body === null || typeof body !== 'object') {
+      throw new Error(`write(${opName}) requires an object body.`);
+    }
+    const path = buildWritePath(opName, siteId, params);
+    return this.request(op.method, path, { body, version: op.version });
   }
 
   #send({ method, url, headers, payload }) {
@@ -88,7 +126,7 @@ export class OmadaClient {
     });
   }
 
-  #envelope(raw, method, path) {
+  #envelope(raw, method, path, { requireResult = true } = {}) {
     if (raw.status < 200 || raw.status >= 300) {
       throw new Error(`${method} ${path} failed: HTTP ${raw.status}`);
     }
@@ -104,10 +142,10 @@ export class OmadaClient {
     if (parsed.errorCode !== 0) {
       throw new Error(`${method} ${path} returned error ${parsed.errorCode}: ${parsed.msg || 'unknown error'}`);
     }
-    if (parsed.result === undefined) {
+    if (requireResult && parsed.result === undefined) {
       throw new Error(`${method} ${path} returned no result; refusing to treat it as empty.`);
     }
-    return parsed.result;
+    return parsed.result ?? {};
   }
 
   /** Resolve an access token, fetching via client credentials only if needed. */
