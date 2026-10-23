@@ -9,12 +9,18 @@ import { z } from 'zod';
 
 import { certificateAgent, redact } from './core.mjs';
 import { OmadaClient } from './omada-client.mjs';
+import { registerWriteTools } from './write-tools.mjs';
+import { writesEnabled as writeFlag } from './write-guard.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Config/PEM live at the package root (one level above src/), matching setup.mjs.
 const root = dirname(here);
 const CONFIG_PATH = process.env.OMADA_CONFIG ?? join(root, 'controller.json');
 const PEM_PATH = process.env.OMADA_PEM ?? join(root, 'controller.pem');
+
+// Read the write-mode flag once, up front. It decides both which tools are
+// registered and what the server reports. Default is read-only.
+const ENABLE_WRITES = writeFlag();
 
 /** Fixed dataset registry: known read paths, version, and pagination behaviour. */
 const DATASETS = {
@@ -104,6 +110,7 @@ function get() {
     accessToken: c.accessToken,
     clientId: c.clientId,
     clientSecret: c.clientSecret,
+    enableWrites: writeFlag(),
   });
   return client;
 }
@@ -126,8 +133,10 @@ const server = new McpServer(
   { name: 'omada-mcp', version: '1.0.0' },
   {
     instructions:
-      'Read-only Omada inventory over the Open API. No configuration writes, generic HTTP tools, reboots, or deletes are exposed. ' +
-      'API errors and incomplete pagination are surfaced as errors, never as empty datasets.',
+      'Omada inventory over the Open API. Read tools are always available. ' +
+      (ENABLE_WRITES
+        ? 'WRITE tools are REGISTERED (OMADA_ENABLE_WRITES=true): each is dry-run by default and only sends when you pass confirm:true. Verify reads before and after writes.'
+        : 'This server is READ-ONLY: no write tools are registered, and every outbound request is restricted to GET plus the OAuth token endpoint.'),
   },
 );
 
@@ -195,7 +204,8 @@ tool(
     if (!pemPresent) missing.push('controller.pem');
 
     return {
-      mode: 'read-only',
+      mode: ENABLE_WRITES ? 'write-enabled' : 'read-only',
+      writesEnabled: ENABLE_WRITES,
       baseUrl: baseUrl ?? null,
       omadacId: omadacId ?? null,
       certificatePinned: Boolean(certificateSha256 && pemPresent),
@@ -206,6 +216,9 @@ tool(
       datasets: Object.keys(DATASETS).length,
       authenticated: 'not tested by this tool',
       setupHint: missing.length ? 'run: node setup.mjs https://<controller-url>' : undefined,
+      writeHint: ENABLE_WRITES
+        ? 'Write tools are registered; each is dry-run until confirm:true.'
+        : undefined,
       credentialHint:
         accessToken || clientId
           ? undefined
@@ -258,6 +271,14 @@ tool(
     return c.readDataset(siteId, DATASETS[dataset]);
   },
 );
+
+// Write tools exist only when the operator has explicitly opted in via
+// OMADA_ENABLE_WRITES=true. A read-only server never registers them at all.
+// get is passed as a lazy thunk so a missing config yields a per-call error
+// instead of crashing the server at startup.
+if (ENABLE_WRITES) {
+  registerWriteTools(server, () => get());
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

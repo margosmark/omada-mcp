@@ -4,20 +4,33 @@ A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server
 [TP-Link Omada](https://www.omadanetworks.com/) controllers (SDN / Omada Controller 5.x–6.x).
 
 It lets an MCP client (OpenCode, Claude, Cursor, etc.) inspect an Omada network — sites, devices,
-clients, VLANs, gateway ACLs, NAT, mDNS, QoS, DNS and more — **without any ability to change
-configuration**.
+clients, VLANs, gateway ACLs, NAT, mDNS, QoS, DNS and more.
 
-## Why read-only?
+**Read-only by default.** Set `OMADA_ENABLE_WRITES=true` to additionally register 17 write tools
+(Gateway ACL, DHCP reservation, group, port-forward, mDNS, LAN network create/update/delete plus
+ACL reorder). See [Write mode](#write-mode) — even when enabled, every write is dry-run until you
+pass `confirm:true`, and only a fixed whitelist of endpoints is reachable.
 
-Most Omada MCP servers can write. That's powerful, but risky: a model can delete an ACL, disable a
-VLAN, or reboot a gateway. This server is deliberately write-incapable at three independent layers:
+## Why read-only by default?
 
-1. **No write methods.** The Omada client exposes only read operations. There is no `create`,
-   `update`, `delete`, or generic escape hatch.
-2. **A method guard.** Every outbound request passes `assertReadOnly()`, which permits only `GET`
-   plus the single OAuth token endpoint. This runs before any socket is opened.
-3. **Fixed paths.** Request paths come from a compile-time registry of known datasets, never from
-   tool input; `siteId` values are percent-encoded so they can't traverse a path.
+Most Omada MCP servers can write unconditionally. That's powerful, but risky: a model can delete an
+ACL, disable a VLAN, or reboot a gateway from a mistyped prompt. Here, write capability is an
+explicit opt-in rather than an assumption, and it stays constrained even when on:
+
+1. **Flag-gated registration.** Without `OMADA_ENABLE_WRITES=true`, write tools are never
+   registered — they don't appear in the tool list at all.
+2. **Dry-run default.** When registered, every write tool validates and returns the request
+   **without sending it** unless you pass `confirm: true`. Two independent gates.
+3. **No arbitrary writers.** There is no generic `create`/`update`/`delete`/`request` escape hatch.
+   Writes go through one `write(operation, …)` entry point bound to a fixed operation whitelist.
+4. **Method + path guard.** Every mutating request is re-checked against the whitelist's exact
+   verb, path pattern, API version, and controller ID before any socket opens.
+5. **Strict identifiers.** Dynamic path segments must match `[A-Za-z0-9_-]+`, so an identifier
+   cannot traverse out of its path segment (`..`, `/`, `//` are all rejected).
+6. **Schema validation.** Write bodies require the fields Omada's own Open API marks required;
+   unknown top-level fields are rejected by a strict input schema.
+7. **Read-back.** Each write returns Omada's acknowledgement (`errorCode 0` = accepted); verify
+   with the read tools before and after.
 
 If you want write access, use a tool that was built and reviewed for it — not this one.
 
@@ -110,6 +123,8 @@ so if you're running next to the repo you only need to supply credentials.
 
 ## Tools
 
+Read tools (always available):
+
 | Tool | Purpose |
 | --- | --- |
 | `getConnectionStatus` | Local config readiness; no login, no network call |
@@ -130,6 +145,59 @@ methods are reachable:
 Endpoint paths were checked against the Omada Open API reference. Endpoints can vary by controller
 version: an unsupported or unauthorized endpoint returns a visible error, never an empty list.
 
+## Write mode
+
+Off by default. To enable:
+
+```sh
+OMADA_ENABLE_WRITES=true npm start
+```
+
+This registers 17 additional tools:
+
+| Group | Tools |
+| --- | --- |
+| Gateway ACL | `createGatewayAcl`, `updateGatewayAcl`, `deleteGatewayAcl`, `reorderGatewayAcls` |
+| DHCP reservation | `createDhcpReservation`, `updateDhcpReservation`, `deleteDhcpReservation` |
+| Group profile | `createGroupProfile`, `updateGroupProfile`, `deleteGroupProfile` |
+| Port forwarding | `createPortForward`, `updatePortForward`, `deletePortForward` |
+| mDNS | `createMdnsRule`, `updateMdnsRule`, `deleteMdnsRule` |
+| LAN network | `updateLanNetwork` |
+
+### The two gates
+
+1. **`OMADA_ENABLE_WRITES=true`** — registers the tools. Without it they don't exist.
+2. **`confirm: true`** on each call — actually dispatches. Omit it (or set `false`) and the call
+   is a **dry-run**: it validates the body, builds the exact path, and returns what *would* be
+   sent, without touching the network.
+
+So a cautious workflow is: call normally to preview → inspect path and body → re-send with
+`confirm: true`.
+
+```text
+Preview  → { "dryRun": true, "sent": false, "path": "/sites/<id>/acls/osg-acls", ... }
+Apply    → { "sent": true, "controllerAck": { ... } }
+```
+
+### What write mode cannot do
+
+Even with the flag on, these remain blocked:
+
+- **Anything not on the whitelist.** Only the verbs/paths in the table above. ACL delete is at
+  `/acls/{id}` while update is at `/acls/osg-acls/{id}` — both allowlisted precisely; a delete to
+  the update path is rejected, as is `PUT /acls/modifyIndex`.
+- **Wrong API version.** `updateLanNetwork` is v2 only; using it at v1 is rejected.
+- **A different controller.** Paths are checked against the configured `omadacId`.
+- **Path traversal.** Identifiers must match `[A-Za-z0-9_-]+`.
+- **Schema-invalid bodies.** Required fields enforced; unknown top-level keys rejected.
+- **Reboots, firmware upgrades, client blocking, arbitrary HTTP.** Not in the whitelist.
+
+### Recommendation
+
+Keep write mode **off** for routine/agent-driven inspection. Turn it on only when you intend to
+change configuration, and preview first. Give the Omada credential the narrowest role that still
+permits the operations you need.
+
 ## Configuration reference
 
 | Variable | Required | Description |
@@ -139,6 +207,7 @@ version: an unsupported or unauthorized endpoint returns a visible error, never 
 | `OMADA_CERT_SHA256` | one of* | SHA-256 of the controller's leaf certificate |
 | `OMADA_ACCESS_TOKEN` | one of | Pre-fetched OAuth access token |
 | `OMADA_CLIENT_ID` / `OMADA_CLIENT_SECRET` | one of | Open API Client-mode application |
+| `OMADA_ENABLE_WRITES` | no | `true` registers the write tools; omitted/false = read-only (default) |
 | `OMADA_CONFIG` | no | Path to `controller.json` |
 | `OMADA_PEM` | no | Path to the pinned `controller.pem` |
 | `OMADA_CREDENTIALS` | no | Path to a credentials JSON file |
@@ -161,9 +230,12 @@ version: an unsupported or unauthorized endpoint returns a visible error, never 
 npm test
 ```
 
-Covers: the method guard, absence of write methods on the client, the Omada `AccessToken` header
-format, secret redaction, pagination completeness/failure behaviour, path construction safety, and
-certificate pinning (including refusal of a mismatched fingerprint).
+Covers: the read-only method guard, absence of bypass writers on the client, the Omada
+`AccessToken` header format, secret redaction, pagination completeness/failure, path construction
+safety, certificate pinning (including refusal of a mismatched fingerprint), the write flag
+defaulting off, the operation whitelist's exact verb/path/version matching, path-traversal
+rejection in identifiers, write-tool registration only when enabled, and dry-run by default with
+`confirm:true` required to dispatch.
 
 ## Not affiliated
 
