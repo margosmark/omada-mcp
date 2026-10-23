@@ -55,14 +55,17 @@ export class OmadaClient {
   /** Low-level request. Returns the parsed JSON envelope. */
   async request(method, path, { params, body, version = 'v1' } = {}) {
     const m = String(method).toUpperCase();
+    // Build the URL once; the guard takes pathname only (a full https:// URL
+    // would trip the '//' safety check that exists to block protocol-relative
+    // paths like //evil.example).
+    const url = new URL(this.#url(version, path));
     if (m === 'GET') {
-      assertReadOnly(m, path);
+      assertReadOnly(m, url.pathname);
     } else {
       // Defence in depth: re-checks the fully-built path against WRITE_OPS.
-      if (!this.#writesEnabled) assertReadOnly(m, path);
-      assertWriteAllowed(m, this.#url(version, path), this.#omadacId);
+      if (!this.#writesEnabled) assertReadOnly(m, url.pathname);
+      assertWriteAllowed(m, url.pathname, this.#omadacId);
     }
-    const url = new URL(this.#url(version, path));
     for (const [key, value] of Object.entries(params ?? {})) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
@@ -94,11 +97,14 @@ export class OmadaClient {
     }
     const op = WRITE_OPS[opName];
     if (!op) throw new Error(`Unknown write operation: ${opName}`);
-    if (body === undefined || body === null || typeof body !== 'object') {
+    // DELETE endpoints take no request body; POST/PUT/PATCH require one. Passing
+    // a body to DELETE would send an unexpected entity to the controller.
+    const isDelete = op.method === 'DELETE';
+    if (!isDelete && (body === undefined || body === null || typeof body !== 'object')) {
       throw new Error(`write(${opName}) requires an object body.`);
     }
     const path = buildWritePath(opName, siteId, params);
-    return this.request(op.method, path, { body, version: op.version });
+    return this.request(op.method, path, { body: isDelete ? undefined : body, version: op.version });
   }
 
   #send({ method, url, headers, payload }) {

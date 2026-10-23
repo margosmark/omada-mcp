@@ -30,6 +30,45 @@ test('write() refuses when the write flag is off, before any network I/O', async
   );
 });
 
+test('DELETE operations require no body; POST/PUT/PATCH require one', async () => {
+  const { client } = recordingClient({ enableWrites: true });
+  // The body check runs BEFORE path validation in write(). Using an invalid
+  // siteId makes every call fail at path-build, so no socket is ever opened —
+  // and the error message tells us whether the body check fired.
+  const deletes = [
+    ['deleteGatewayAcl', { aclId: 'a' }],
+    ['deleteDhcpReservation', { mac: 'AA-BB-CC-DD-EE-FF' }],
+    ['deleteGroupProfile', { type: '0', id: 'g1' }],
+    ['deletePortForward', { id: 'p1' }],
+    ['deleteMdnsRule', { id: 'm1' }],
+  ];
+  for (const [op, params] of deletes) {
+    // No body + bad siteId -> must fail on siteId, NOT on missing body.
+    await assert.rejects(
+      () => client.write(op, { siteId: '../bad', params }),
+      /Invalid siteId/,
+      `${op}: DELETE should not require a body (it should reach path validation)`,
+    );
+  }
+
+  const withBody = [
+    ['createGatewayAcl', {}], ['updateGatewayAcl', { aclId: 'a' }],
+    ['createDhcpReservation', {}], ['updateDhcpReservation', { mac: 'AA-BB-CC-DD-EE-FF' }],
+    ['createGroupProfile', {}], ['updateGroupProfile', { type: '0', id: 'g1' }],
+    ['createPortForward', {}], ['updatePortForward', { id: 'p1' }],
+    ['createMdnsRule', {}], ['updateMdnsRule', { id: 'm1' }],
+    ['reorderGatewayAcls', {}], ['updateLanNetwork', { id: 'n1' }],
+  ];
+  for (const [op, params] of withBody) {
+    // No body + bad siteId -> must fail on the body check first.
+    await assert.rejects(
+      () => client.write(op, { siteId: '../bad', params }),
+      /requires an object body/,
+      `${op}: POST/PUT/PATCH should require a body`,
+    );
+  }
+});
+
 test('write() rejects unknown operations and malformed bodies before network I/O', async () => {
   const { client } = recordingClient({ enableWrites: true });
   await assert.rejects(() => client.write('rebootGateway', { siteId: 's', body: {} }), /Unknown write operation/);
