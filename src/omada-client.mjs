@@ -2,9 +2,10 @@ import https from 'node:https';
 import { URL } from 'node:url';
 
 import { accessTokenHeader, assertReadOnly, collectPages } from './core.mjs';
-import { LOG_DATASETS } from './datasets.mjs';
+import { LOG_DATASETS, DEVICE_DATASETS } from './datasets.mjs';
+import { assertDeviceId } from './devices.mjs';
 import { buildLogParams, clampLogLimit } from './logs.mjs';
-import { WRITE_OPS, assertWriteAllowed, buildWritePath, writesEnabled } from './write-guard.mjs';
+import { WRITE_OPS, assertWriteAllowed, buildSitePath, buildWritePath, writesEnabled } from './write-guard.mjs';
 
 /**
  * Omada Open API client.
@@ -240,6 +241,47 @@ export class OmadaClient {
     }
     const result = await this.#read(definition.version ?? 'v1', `${base}${definition.path}`);
     return { complete: true, result };
+  }
+
+  /**
+   * Read the detail record of one adopted device.
+   *
+   * `kind` must be a key of DEVICE_DATASETS holding a `{deviceId}` template —
+   * there is no generic /devices/{mac} route (verified live: 404), so the
+   * caller resolves the device type from the site device list first. The
+   * identifier is validated by the same SAFE_ID path-traversal rule the write
+   * paths use, so a device id can never inject a path segment.
+   */
+  async readDeviceDetail(siteId, kind, deviceId) {
+    const definition = DEVICE_DATASETS[kind];
+    if (!definition || definition.paginated !== false || !definition.path.includes('{deviceId}')) {
+      throw new Error(`Not a device detail dataset: ${kind}`);
+    }
+    const path = buildSitePath(definition.path, { deviceId });
+    const result = await this.#read(definition.version ?? 'v1', `${this.#site(siteId)}${path}`);
+    return { complete: true, result };
+  }
+
+  /**
+   * Read one switch-port dataset (`switchPorts` counters or `switchPortPoe`
+   * PoE info) through the fixed registry.
+   *
+   * `switchMac` is passed as the controller's own `filters.switchMac` query
+   * filter, which is verified to narrow these endpoints server-side; it is
+   * validated with SAFE_ID first so it cannot carry a second filter. When it
+   * is omitted the whole site's ports are collected — through collectPages(),
+   * so a truncated or repeated page surfaces as an error, never a short list.
+   */
+  async readSwitchPortDataset(siteId, kind, options = {}) {
+    const definition = DEVICE_DATASETS[kind];
+    if (!definition || definition.paginated !== true || !definition.filters?.includes('switchMac')) {
+      throw new Error(`Not a switch-port dataset: ${kind}`);
+    }
+    const params = {};
+    if (options.switchMac !== undefined && options.switchMac !== null) {
+      params['filters.switchMac'] = assertDeviceId(options.switchMac, 'switchMac');
+    }
+    return await this.#readAll(definition.version ?? 'v1', `${this.#site(siteId)}${definition.path}`, params);
   }
 
   /**

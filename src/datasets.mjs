@@ -6,6 +6,12 @@
  * method: a tool either names a dataset in this registry, or calls one of the
  * named client methods in src/omada-client.mjs.
  *
+ * DEVICE_DATASETS entries are the adopted-device status endpoints read by the
+ * getDevice / getSwitchPorts tools. They are separate because the detail
+ * endpoints take a validated device identifier inside the path (no generic
+ * /devices/{mac} route exists on the controller), and because the switch-port
+ * endpoints need a server-side `switchMac` filter to be useful.
+ *
  * CONFIG_DATASETS entries are readable through the generic readSiteConfiguration
  * tool: `path` is relative to `/sites/{siteId}`, `version` selects the Open API
  * version, `paginated` selects the full-inventory read (collectPages) versus a
@@ -16,6 +22,21 @@
  * than as a whole-dataset inventory, so they get their own tools
  * (getAlerts / getEvents) instead of being folded into readSiteConfiguration.
  */
+export const DEVICE_DATASETS = {
+  switchDetail: { path: '/switches/{deviceId}', version: 'v1', paginated: false },
+  apDetail: { path: '/aps/{deviceId}', version: 'v1', paginated: false },
+  gatewayDetail: { path: '/gateways/{deviceId}', version: 'v1', paginated: false },
+  switchPorts: { path: '/switches/ports/counters', version: 'v1', paginated: true, filters: ['switchMac'] },
+  switchPortPoe: { path: '/switches/ports/poe-info', version: 'v1', paginated: true, filters: ['switchMac'] },
+};
+
+/** Device `type` value from /devices -> DEVICE_DATASETS detail key. */
+export const DEVICE_TYPE_DATASETS = {
+  switch: 'switchDetail',
+  ap: 'apDetail',
+  gateway: 'gatewayDetail',
+};
+
 export const CONFIG_DATASETS = {
   dhcpReservations: { path: '/setting/service/dhcp', paginated: true, version: 'v1' },
   groups: { path: '/profiles/groups', paginated: false, version: 'v1' },

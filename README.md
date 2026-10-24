@@ -136,6 +136,8 @@ Read tools (always available):
 | `readSiteConfiguration` | Read one fixed dataset from a fixed registry |
 | `getAlerts` | Recent site alerts (severity, category, message, timestamp) |
 | `getEvents` | Paginated site event log, newest first |
+| `getDevice` | One device by MAC: model, status, uptime, counts, type-specific detail |
+| `getSwitchPorts` | Switch port status: link, speed, PoE, errors, and the client on each port |
 
 `readSiteConfiguration` accepts one of a fixed set of dataset names — no arbitrary paths or HTTP
 methods are reachable:
@@ -187,6 +189,82 @@ What the controller does **not** expose, and the tools therefore do not claim:
 The default window is the last 7 days. The log endpoints require a time window and bounded
 pagination server-side, so the reads are always windowed and paginated — a malformed, truncated
 or repeated response is a visible error, never "0 results".
+
+### Device and switch-port status
+
+`getDevice` and `getSwitchPorts` read one device and one switch's ports. Both take a `siteId` and
+an optional `deviceId` — a MAC address as `listDevices` reports it. The id is uppercased for
+comparison and is otherwise the controller's own value, so `28-87-BA-C0-4E-4A`,
+`28-87-ba-c0-4e-4a` and `2887BAC04E4A` all resolve to the same device. The id must be one of
+`[A-Za-z0-9_-]` and is rejected **before** any controller call.
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `getDevice` | `siteId`, `deviceId` | `{siteId, device}` |
+| `getSwitchPorts` | `siteId`, `deviceId` (optional) | `{siteId, deviceId, portCount, switchCount, switches, ports}` |
+
+`deviceId` is **required** on `getDevice` and **optional** on `getSwitchPorts`: with it, only that
+switch's ports come back; without it, every switch in the site is read.
+
+`getDevice` resolves the id against the site's **real device list** before issuing a detail
+request, so an unknown id is an error naming the id — and listing a few valid ones — rather than a
+404 or an empty body. An unsupported device type is likewise an error that names the type.
+
+**There is no generic device-detail endpoint.** The controller has no `/devices/{mac}` route —
+it answers 404. Each device type has its own detail route, so `getDevice` reads
+`switches/{mac}`, `aps/{mac}` or `gateways/{mac}` depending on what the id actually is.
+
+`device` is `{deviceId, name, type, model, modelName, modelVersion, hardwareVersion, ip,
+firmwareVersion, firmwareVersionShort, status, statusCode, statusCategory, statusDetail,
+statusDetailCode, uptimeSeconds, uptime, cpuUtil, memUtil, temperature, sn, lastSeen,
+portCount}`:
+
+- `status` is `online`/`offline`/`unknown`, derived from the device's own code in the controller's
+  own space and not reinterpreted. `statusDetail` and `statusDetailCode` keep the detail route's
+  separate status space intact — the list route and the detail route do not share one.
+  `statusCategory` is the detail route's own coarser category, reported as the raw code.
+- The Open API does not report last-seen for a device, so `lastSeen` mirrors `uptime` when the
+  device is connected and is `null` when it is not.
+- An unadopted device has no uptime or firmware in the list row. Those fields are `null`, never
+  `0` — an uptime of 0 seconds and no uptime at all are different facts, and a controller that
+  omits a field is not being reported as "just now".
+- `cpuUtil`/`memUtil` are null on an AP, `temperature`/`portCount` are gateway/switch-only. The
+  tools never guess a value the controller does not expose for that device type.
+- A device id is **not** validated against the write path parameters. `getDevice` proves the id
+  exists in the site's device list, which is the read-only question; it never touches
+  `deviceParamPath`.
+
+`getSwitchPorts` joins three read-only endpoints in parallel — `switches/ports/counters` (link
+state, errors and byte counters), `switches/ports/poe-info` (PoE) and `clients` (what is plugged
+in) — narrowed server-side by `filters.switchMac` when a `deviceId` was given, and paginated until
+every row is in hand. `switches` gives the per-switch tally `{mac, name, ports, linksUp,
+clients}`, so a filtered read of one switch is distinguishable from a whole-site read without
+recounting.
+
+Each port is `{switchMac, switchName, port, portName, linkUp, linkSpeedCode, linkSpeedMbps,
+linkSpeed, duplex, duplexCode, poeSupported, poeMode, poeActive, poePowerW, poeVoltage,
+poeCurrent, poeClass, txBytes, rxBytes, txErrors, rxErrors, stp, clientConnected, clients,
+clientMac, clientName, clientIp, clientType}`:
+
+- `clientConnected` is the **port's** link flag, not a count of end devices. An uplink carrying
+  another switch is `clientConnected: true, clients: 0`, and its `clientMac`/`clientName`/
+  `clientIp`/`clientType` are null.
+- `linkSpeedMbps` and `linkSpeed` come from a code map. Codes `1`/`2`/`3` (10M/100M/1G) are
+  corroborated by the controller's own data; any other code keeps `linkSpeedCode` and reports the
+  two derived fields as null rather than guessing a rate. See `LINK_SPEEDS` in `src/devices.mjs`
+  for why code 5 is deliberately left unmapped.
+- PoE is reported in two separate pieces, deliberately. `poeSupported` (this port is a PoE port)
+  and `poeMode` (PoE enabled on this port) come from the counters row's own flags, so they are
+  present even where the controller exposes no live telemetry. The `poe-info` join supplies only
+  the live figures, so a port with no telemetry row gets null `poePowerW`/`poeVoltage`/
+  `poeCurrent`/`poeClass` rather than a fabricated 0 W — a switch with no PoE ports still
+  reports its ports, each correctly marked unsupported.
+- `poeClass` is null when the controller reports `'--'`, its sentinel for a PoE port with no
+  powered device attached. That is "nothing is drawing power", not class 0.
+- Port names come from the counters rows themselves; the tools read no port configuration.
+- Only the `switches/{mac}` detail route used by `getDevice` returns a port list at all, and that
+  is configuration — profile, PoE mode, enabled flag — not link status. `getSwitchPorts` does not
+  merge it in.
 
 ## Write mode
 

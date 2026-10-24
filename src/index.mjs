@@ -8,7 +8,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { certificateAgent, redact } from './core.mjs';
-import { CONFIG_DATASETS, CONFIG_DATASET_NAMES, LOG_DATASETS } from './datasets.mjs';
+import { CONFIG_DATASETS, CONFIG_DATASET_NAMES, DEVICE_DATASETS, LOG_DATASETS } from './datasets.mjs';
+import { deviceToolSpecs } from './device-tools.mjs';
 import { logToolSpecs } from './log-tools.mjs';
 import { OmadaClient } from './omada-client.mjs';
 import { createToolRegistrar } from './tool.mjs';
@@ -184,6 +185,8 @@ tool(
       // endpoints behind getAlerts/getEvents.
       datasets: Object.keys(DATASETS).length,
       logDatasets: Object.keys(LOG_DATASETS).length,
+      // Fixed device datasets behind getDevice / getSwitchPorts.
+      deviceDatasets: Object.keys(DEVICE_DATASETS).length,
       // The number of tools this server actually registered, so the report
       // cannot drift from the real tool surface. Write tools are only
       // registered when OMADA_ENABLE_WRITES=true, so the count reflects that.
@@ -255,6 +258,17 @@ for (const spec of logToolSpecs({ getClient: () => get(), secrets: secretsInUse 
 
 if (Object.keys(LOG_DATASETS).join(',') !== 'alerts,events') {
   throw new Error('Unexpected site log dataset registry.');
+}
+
+// Adopted-device status tools (getDevice / getSwitchPorts). Same pattern as
+// the log tools: the specs live in src/device-tools.mjs so the handler logic
+// is testable without a live controller.
+for (const spec of deviceToolSpecs({ getClient: () => get(), secrets: secretsInUse })) {
+  tool(spec.name, spec.description, spec.schema, spec.handler);
+}
+
+if (Object.keys(DEVICE_DATASETS).join(',') !== 'switchDetail,apDetail,gatewayDetail,switchPorts,switchPortPoe') {
+  throw new Error('Unexpected device dataset registry.');
 }
 
 // Write tools exist only when the operator has explicitly opted in via
