@@ -8,6 +8,55 @@ import { buildLogParams, clampLogLimit } from './logs.mjs';
 import { WRITE_OPS, assertWriteAllowed, buildSitePath, buildWritePath, writesEnabled } from './write-guard.mjs';
 
 /**
+ * Controller error code for "The access token has expired. Please re-initiate
+ * the refreshToken process…". Observed live 2026-10-24 on every tool call once
+ * a long-lived process outlived the token it fetched at startup.
+ */
+export const TOKEN_EXPIRED_CODE = -44112;
+
+/**
+ * True when a thrown request error is the controller reporting an expired
+ * access token. Matches the attached `errorCode` first, then the exact text
+ * `#envelope` produces, so a code attached anywhere in the chain is honoured
+ * and message parsing stays a fallback rather than the contract.
+ *
+ * Note the controller's wording is misleading: with grant_type=client_credentials
+ * there is no refresh token at all. A client that holds clientId+clientSecret
+ * mints a brand new access token instead of refreshing anything.
+ */
+export function isTokenExpiredError(error) {
+  if (!error) return false;
+  if (error.errorCode === TOKEN_EXPIRED_CODE) return true;
+  return typeof error.message === 'string' && error.message.includes(`returned error ${TOKEN_EXPIRED_CODE}:`);
+}
+
+/**
+ * Run `attempt()`; if it fails with an expired-token error, call `refresh()`
+ * exactly once and run `attempt()` a second time.
+ *
+ * Guarantees, in order of importance:
+ *  - `refresh()` runs at most once per call, so a controller that keeps
+ *    returning -44112 (revoked client credentials, a wrong clock) fails after
+ *    one retry instead of looping forever.
+ *  - The second failure propagates untouched — callers see the real error.
+ *  - Non-expired errors are never masked by a refresh attempt, so a genuine
+ *    404 or a blocked write is reported as itself, with no extra round trip.
+ *
+ * `refresh` rejections propagate: losing the network during a refresh is a
+ * harder failure than the expired token that triggered it, and hiding it would
+ * turn a connectivity fault into a confusing "expired" report.
+ */
+export async function withTokenRefresh(attempt, refresh) {
+  try {
+    return await attempt();
+  } catch (error) {
+    if (!isTokenExpiredError(error)) throw error;
+    await refresh();
+    return attempt();
+  }
+}
+
+/**
  * Omada Open API client.
  *
  * Read-only by default: every request passes assertReadOnly, which permits only
@@ -73,21 +122,50 @@ export class OmadaClient {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
 
-    const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
     const isTokenRequest = m === 'POST' && url.pathname === '/openapi/authorize/token';
-    if (isTokenRequest) {
-      // Token endpoint: OAuth body auth, no bearer header.
-    } else {
-      Object.assign(headers, accessTokenHeader(await this.#token()));
-    }
-
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    if (payload) headers['Content-Length'] = payload.length;
 
-    const raw = await this.#send({ method: m, url, headers, payload });
-    // Reads must return data; writes may legitimately return no result field
-    // (e.g. reorder uses OperationResponseWithoutResult).
-    return this.#envelope(raw, m, url.pathname, { requireResult: m === 'GET' });
+    // Headers are built inside the attempt (not once above) because a retried
+    // attempt must carry the newly minted token in its Authorization header —
+    // reusing the first attempt's headers would replay the expired one.
+    const attempt = async () => {
+      const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+      if (isTokenRequest) {
+        // Token endpoint: OAuth body auth, no bearer header.
+      } else {
+        Object.assign(headers, accessTokenHeader(await this.#token()));
+      }
+      if (payload) headers['Content-Length'] = payload.length;
+      const raw = await this.#send({ method: m, url, headers, payload });
+      // Reads must return data; writes may legitimately return no result field
+      // (e.g. reorder uses OperationResponseWithoutResult).
+      return this.#envelope(raw, m, url.pathname, { requireResult: m === 'GET' });
+    };
+
+    // The controller expires the cached access token server-side with no
+    // warning while #token() keeps handing that cache back, so a long-lived
+    // process failed every call from then on with -44112 (seen live 2026-10-24:
+    // ~5h uptime, then permanent failure until the process was killed). When
+    // client credentials are configured, mint a fresh token and retry once.
+    // A client built with a static accessToken and no credentials has nothing
+    // to re-mint, so it keeps the original error — that case really does need
+    // re-auth. The token endpoint itself is never retried.
+    if (isTokenRequest || !this.#clientId || !this.#clientSecret) return attempt();
+    return withTokenRefresh(attempt, () => this.#refreshToken());
+  }
+
+  /**
+   * Discard the cached access token and mint a new one via
+   * grant_type=client_credentials. Callers only reach this when clientId and
+   * clientSecret are both configured (request() checks first).
+   *
+   * `#pendingToken` is cleared too so a refresh can never join an in-flight
+   * fetch that was started against the token we just discarded.
+   */
+  async #refreshToken() {
+    this.#accessToken = undefined;
+    this.#pendingToken = undefined;
+    await this.#token();
   }
 
   /**
@@ -149,7 +227,12 @@ export class OmadaClient {
       throw new Error(`${method} ${path} returned an unexpected response shape.`);
     }
     if (parsed.errorCode !== 0) {
-      throw new Error(`${method} ${path} returned error ${parsed.errorCode}: ${parsed.msg || 'unknown error'}`);
+      const error = new Error(`${method} ${path} returned error ${parsed.errorCode}: ${parsed.msg || 'unknown error'}`);
+      // Carried so callers can branch on the controller's own code instead of
+      // re-parsing message text. `code` is left for Node's conventions;
+      // `errorCode` mirrors the response field exactly (it is negative here).
+      error.errorCode = parsed.errorCode;
+      throw error;
     }
     if (requireResult && parsed.result === undefined) {
       throw new Error(`${method} ${path} returned no result; refusing to treat it as empty.`);
