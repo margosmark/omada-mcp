@@ -8,7 +8,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { certificateAgent, redact } from './core.mjs';
+import { CONFIG_DATASETS, CONFIG_DATASET_NAMES, LOG_DATASETS } from './datasets.mjs';
+import { logToolSpecs } from './log-tools.mjs';
 import { OmadaClient } from './omada-client.mjs';
+import { createToolRegistrar } from './tool.mjs';
 import { registerWriteTools } from './write-tools.mjs';
 import { writesEnabled as writeFlag } from './write-guard.mjs';
 
@@ -23,31 +26,7 @@ const PEM_PATH = process.env.OMADA_PEM ?? join(root, 'controller.pem');
 const ENABLE_WRITES = writeFlag();
 
 /** Fixed dataset registry: known read paths, version, and pagination behaviour. */
-const DATASETS = {
-  dhcpReservations: { path: '/setting/service/dhcp', paginated: true, version: 'v1' },
-  groups: { path: '/profiles/groups', paginated: false, version: 'v1' },
-  gatewayAcls: { path: '/acls/osg-acls', paginated: true, version: 'v1' },
-  gatewayAclMode: { path: '/acls/osg-config-mode', paginated: false, version: 'v1' },
-  customGatewayAcls: { path: '/acls/osg-custom-acls', paginated: true, version: 'v1' },
-  portForwards: { path: '/nat/port-forwardings', paginated: true, version: 'v1' },
-  mdns: { path: '/setting/service/mdns', paginated: true, version: 'v1' },
-  bonjourServices: { path: '/profiles/bonjour-service', paginated: false, version: 'v1' },
-  siteSpecification: { path: '/specification', paginated: false, version: 'v1' },
-  internet: { path: '/internet', paginated: false, version: 'v1' },
-  bandwidthControl: { path: '/bandwidth-control', paginated: false, version: 'v1' },
-  bandwidthRules: { path: '/bandwidth-control/rules', paginated: true, version: 'v1' },
-  gatewayBandwidthRules: { path: '/qos/gateway/bwcs', paginated: true, version: 'v1' },
-  qosWans: { path: '/qos/gateway/wans', paginated: false, version: 'v1' },
-  qosClasses: { path: '/qos/gateway/class-rules', paginated: true, version: 'v1' },
-  dnsProxy: { path: '/setting/service/dns-proxy', paginated: false, version: 'v1' },
-  dnsCache: { path: '/setting/service/dns-cache', paginated: false, version: 'v1' },
-  firewall: { path: '/firewall', paginated: false, version: 'v1' },
-  idsIps: { path: '/network-security/ips', paginated: false, version: 'v1' },
-  remoteLogging: { path: '/remote-logging', paginated: false, version: 'v1' },
-  igmp: { path: '/setting/service/igmp', paginated: false, version: 'v1' },
-  clients: { path: '/clients', paginated: true, version: 'v1' },
-  lanNetworks: { path: '/lan-networks', paginated: true, version: 'v2' },
-};
+const DATASETS = CONFIG_DATASETS;
 
 function readSecretFile(path) {
   try {
@@ -142,28 +121,16 @@ const server = new McpServer(
 
 const siteSchema = z.object({ siteId: z.string().min(1) }).strict();
 const datasetSchema = z
-  .object({ siteId: z.string().min(1).optional(), dataset: z.enum(Object.keys(DATASETS)) })
+  .object({ siteId: z.string().min(1).optional(), dataset: z.enum(CONFIG_DATASET_NAMES) })
   .strict();
 
-function tool(name, description, schema, handler) {
-  server.registerTool(
-    name,
-    {
-      description,
-      inputSchema: schema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
-    async (args) => {
-      try {
-        const result = await handler(args);
-        return { content: [{ type: 'text', text: JSON.stringify(sanitize(result), null, 2) }] };
-      } catch (error) {
-        // Never serialise an Axios/error object: it can carry request headers.
-        return { isError: true, content: [{ type: 'text', text: sanitize(error.message || 'Read failed.') }] };
-      }
-    },
-  );
-}
+// Every read tool is registered through this one helper, so they all share
+// the same redaction and visible-error handling. See src/tool.mjs.
+const tool = createToolRegistrar(server, sanitize);
+
+// Write tool names, filled in below when (and only when) writes are enabled.
+// Declared here so getConnectionStatus can report the real tool surface.
+const writeToolNames = [];
 
 tool(
   'getConnectionStatus',
@@ -213,7 +180,14 @@ tool(
       configured: missing.length === 0,
       missing,
       configPath: CONFIG_PATH,
+      // Datasets readable through readSiteConfiguration, and the site log
+      // endpoints behind getAlerts/getEvents.
       datasets: Object.keys(DATASETS).length,
+      logDatasets: Object.keys(LOG_DATASETS).length,
+      // The number of tools this server actually registered, so the report
+      // cannot drift from the real tool surface. Write tools are only
+      // registered when OMADA_ENABLE_WRITES=true, so the count reflects that.
+      tools: tool.names.length + writeToolNames.length,
       authenticated: 'not tested by this tool',
       setupHint: missing.length ? 'run: node setup.mjs https://<controller-url>' : undefined,
       writeHint: ENABLE_WRITES
@@ -272,12 +246,23 @@ tool(
   },
 );
 
+// Site log tools (getAlerts / getEvents). The specs live in src/log-tools.mjs
+// so the same registration path can be exercised in the tests; they are
+// registered through the shared `tool()` helper like every other read tool.
+for (const spec of logToolSpecs({ getClient: () => get(), secrets: secretsInUse })) {
+  tool(spec.name, spec.description, spec.schema, spec.handler);
+}
+
+if (Object.keys(LOG_DATASETS).join(',') !== 'alerts,events') {
+  throw new Error('Unexpected site log dataset registry.');
+}
+
 // Write tools exist only when the operator has explicitly opted in via
 // OMADA_ENABLE_WRITES=true. A read-only server never registers them at all.
 // get is passed as a lazy thunk so a missing config yields a per-call error
 // instead of crashing the server at startup.
 if (ENABLE_WRITES) {
-  registerWriteTools(server, () => get());
+  writeToolNames.push(...registerWriteTools(server, () => get()));
 }
 
 const transport = new StdioServerTransport();
