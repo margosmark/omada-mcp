@@ -43,8 +43,11 @@ function getInfo() {
 
 function getLeaf() {
   return new Promise((resolve, reject) => {
+    // SNI is only valid for hostnames: Node throws on an IP literal here, and
+    // every LAN controller is an IP. Omit servername when the host is an IP.
+    const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(url.hostname) || url.hostname.includes(':');
     const sock = connect(
-      { host: url.hostname, port, servername: url.hostname, rejectUnauthorized: false },
+      { host: url.hostname, port, ...(isIp ? {} : { servername: url.hostname }), rejectUnauthorized: false },
       () => {
         const raw = Buffer.from(sock.getPeerCertificate(false).raw);
         sock.end();
