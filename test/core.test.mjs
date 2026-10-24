@@ -38,8 +38,12 @@ test('the OmadaClient exposes exactly one gated write entry point', () => {
   // Only the reviewed methods may exist. `write` is the single gated entry point;
   // it refuses unless the instance was built with enableWrites, and routes through
   // the operation whitelist (tested in write-guard.test.mjs).
+  //
+  // `readLogDataset` is a read: it reaches only the private #read() (a GET) and
+  // collectPages(), and assertReadOnly (src/core.mjs) rejects every non-GET
+  // request except the OAuth token POST, so it cannot reach a write path.
   const allowed = new Set(['constructor', 'authMode', 'writesEnabled', 'request', 'write',
-    'listSites', 'listDevices', 'listClients', 'getLanNetworks', 'readDataset']);
+    'listSites', 'listDevices', 'listClients', 'getLanNetworks', 'readDataset', 'readLogDataset']);
   for (const name of methods) {
     if (!allowed.has(name)) throw new Error(`Unexpected client method: ${name}`);
   }

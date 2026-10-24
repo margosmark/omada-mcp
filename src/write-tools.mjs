@@ -152,10 +152,15 @@ function toolSchema(spec) {
  *
  * `getClient` is invoked lazily inside each handler so the server can start and
  * report a helpful config error per call, rather than crashing at module load.
+ *
+ * Returns the names of the tools that were registered, so the caller can
+ * report the real tool surface.
  */
 export function registerWriteTools(server, getClient) {
+  const registered = [];
   for (const spec of SPECS) {
     const method = WRITE_OPS[spec.op].method;
+    registered.push(spec.op);
     server.registerTool(
       spec.op,
       {
@@ -204,4 +209,5 @@ export function registerWriteTools(server, getClient) {
       },
     );
   }
+  return registered;
 }

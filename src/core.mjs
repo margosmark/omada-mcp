@@ -66,8 +66,15 @@ export function redact(value, secrets = []) {
  * Fetch every page of a paginated endpoint. Refuses to report success on a
  * truncated, repeated, or malformed read so an error is never mistaken for an
  * empty list.
+ *
+ * `limit` (optional) stops the walk early once that many records are
+ * collected — used by the log endpoints, where the caller asked for a bounded
+ * window rather than the whole history. The returned `limited` flag says the
+ * walk stopped early; the truncation was requested, not detected, so it is
+ * reported instead of thrown. Without `limit` the behaviour is unchanged and
+ * the result is exactly `{ complete: true, records }`.
  */
-export async function collectPages(fetchPage, maxPages = 100) {
+export async function collectPages(fetchPage, maxPages = 100, { limit } = {}) {
   const records = [];
   const seen = new Set();
   for (let page = 1; page <= maxPages; page++) {
@@ -89,6 +96,9 @@ export async function collectPages(fetchPage, maxPages = 100) {
       throw new Error('Pagination changed during the read; retry.');
     }
     if (total !== undefined && records.length === total) return { complete: true, records };
+    if (limit !== undefined && records.length >= limit) {
+      return { complete: true, limited: true, records: records.slice(0, limit) };
+    }
     if (!result.data.length) {
       if (total !== undefined && records.length !== total) {
         throw new Error('API ended before totalRows; result is incomplete.');
