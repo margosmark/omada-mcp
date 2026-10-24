@@ -134,6 +134,8 @@ Read tools (always available):
 | `listClients` | Active clients for a site |
 | `getLanNetworks` | VLAN/subnet/DHCP settings (no SSID passwords) |
 | `readSiteConfiguration` | Read one fixed dataset from a fixed registry |
+| `getAlerts` | Recent site alerts (severity, category, message, timestamp) |
+| `getEvents` | Paginated site event log, newest first |
 
 `readSiteConfiguration` accepts one of a fixed set of dataset names — no arbitrary paths or HTTP
 methods are reachable:
@@ -145,6 +147,46 @@ methods are reachable:
 
 Endpoint paths were checked against the Omada Open API reference. Endpoints can vary by controller
 version: an unsupported or unauthorized endpoint returns a visible error, never an empty list.
+
+### Site logs
+
+`getAlerts` and `getEvents` read the two site log endpoints. Both take a `siteId`, an optional
+`since`/`until` window (ISO-8601 timestamp or date), and a `limit` (default 50, max 200). Records
+come back newest first.
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `getAlerts` | `siteId`, `limit`, `since`, `until`, `category`, `severity`, `resolved` | `{id, key, severity, category, message, time, firstSeen, lastSeen, deviceMacs, clientMacs}` |
+| `getEvents` | `siteId`, `limit`, `since`, `until`, `category` | `{id, key, category, message, time, deviceMacs, clientMacs}` |
+
+- `category` is `System`, `Device` or `Client` (the controller's `filters.module`).
+- `severity` is `Information`, `Warning`, `Error` or `Critical` — **case sensitive**. The
+  controller matches `Warning`, not `warning`.
+- `resolved` is `true` or `false` and applies to alerts only.
+- The event log has no severity and no resolved state, so those filters are **rejected** there
+  rather than silently ignored — the controller accepts a filter it does not implement and
+  returns an unfiltered log that looks filtered.
+- Filter values are validated against a closed list. The controller accepts an unknown value
+  (`warning`, `NotALevel`) and matches nothing, which is indistinguishable from "no such alerts" —
+  so a typo is an error instead of a silent empty result.
+
+Both tools return an envelope: `{kind, siteId, window, limit, returned, totalRows, limited, records}`.
+`totalRows` is the controller's own count for the query and `limited` says whether the read was
+bounded — so "nothing matched" is never confused with "there was more than the limit".
+
+What the controller does **not** expose, and the tools therefore do not claim:
+
+- There is no separate first/last-seen timestamp. The controller stores one occurrence time per
+  row, so `firstSeen` and `lastSeen` both mirror `time`.
+- There is no per-row device or client id. The related hardware is named inside the message
+  (`[ap:28-87-BA-A2-73-62]`, `[client:B4-22-00-0B-23-77 ]`), so `deviceMacs` and `clientMacs` are
+  parsed out of the message text and normalised to the same uppercase-dashed MAC form the
+  device and client inventories use.
+- Event rows carry no severity field at all.
+
+The default window is the last 7 days. The log endpoints require a time window and bounded
+pagination server-side, so the reads are always windowed and paginated — a malformed, truncated
+or repeated response is a visible error, never "0 results".
 
 ## Write mode
 

@@ -2,6 +2,8 @@ import https from 'node:https';
 import { URL } from 'node:url';
 
 import { accessTokenHeader, assertReadOnly, collectPages } from './core.mjs';
+import { LOG_DATASETS } from './datasets.mjs';
+import { buildLogParams, clampLogLimit } from './logs.mjs';
 import { WRITE_OPS, assertWriteAllowed, buildWritePath, writesEnabled } from './write-guard.mjs';
 
 /**
@@ -238,5 +240,49 @@ export class OmadaClient {
     }
     const result = await this.#read(definition.version ?? 'v1', `${base}${definition.path}`);
     return { complete: true, result };
+  }
+
+  /**
+   * Read a bounded window of a site log (alerts or events).
+   *
+   * `kind` is a key of the fixed LOG_DATASETS registry; there is no way to
+   * reach an arbitrary path. The read uses the same #read()/collectPages()
+   * path as every other read, so a malformed, repeated or truncated response
+   * surfaces as an error instead of an empty list.
+   *
+   * The controller requires `page` and `pageSize` on both log endpoints
+   * (omitting either is an HTTP 400), so the page size is derived from the
+   * caller's limit: at most one page is needed to satisfy the limit, and a
+   * larger limit simply walks more pages through collectPages().
+   *
+   * Records are collected from the first page onwards — the controller returns
+   * logs newest-first, and that ordering continues across pages — so the
+   * bounded result is the newest records in the window.
+   */
+  async readLogDataset(siteId, kind, options = {}) {
+    const definition = LOG_DATASETS[kind];
+    if (!definition) throw new Error(`Unknown log dataset: ${kind}`);
+    const limit = clampLogLimit(options.limit);
+    const { params, startMs, endMs } = buildLogParams(options, definition);
+    const pageSize = Math.min(limit, definition.maxPageSize);
+    const path = `${this.#site(siteId)}${definition.path}`;
+    let totalRows;
+    const collected = await collectPages(
+      async (page) => {
+        const result = await this.#read(definition.version ?? 'v1', path, { ...params, page, pageSize });
+        if (totalRows === undefined && Number.isInteger(result?.totalRows)) totalRows = result.totalRows;
+        return result;
+      },
+      100,
+      { limit },
+    );
+    return {
+      kind,
+      totalRows: totalRows ?? null,
+      limited: collected.limited === true,
+      limit,
+      window: { since: new Date(startMs).toISOString(), until: new Date(endMs).toISOString() },
+      records: collected.records,
+    };
   }
 }
