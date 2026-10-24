@@ -12,9 +12,14 @@ import { CONFIG_DATASETS, CONFIG_DATASET_NAMES, DEVICE_DATASETS, LOG_DATASETS } 
 import { deviceToolSpecs } from './device-tools.mjs';
 import { logToolSpecs } from './log-tools.mjs';
 import { OmadaClient } from './omada-client.mjs';
+import { assertRuntimeFloor } from './runtime-floor.mjs';
 import { createToolRegistrar } from './tool.mjs';
 import { registerWriteTools } from './write-tools.mjs';
 import { writesEnabled as writeFlag } from './write-guard.mjs';
+
+// Fail closed before any config read or socket: a runtime vulnerable to
+// CVE-2026-111497 must never get far enough to open a network connection.
+assertRuntimeFloor();
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Config/PEM live at the package root (one level above src/), matching setup.mjs.
